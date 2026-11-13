@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "AI Hub failover",
+    "description": "Adds an `aihub` provider whose models walk an ordered list of platforms, switching automatically when quota runs out or a call fails."
+  }
+}

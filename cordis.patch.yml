@@ -1,0 +1,32 @@
+# Default configuration. Everything here can also be edited from
+# Settings -> AI Hub after the plugin is installed.
+- insert:
+    - id: aihub-failover
+      name: 'dsh-aihub'
+      config:
+        provider: aihub
+        displayName: AI Hub
+        cooldownMs: 60000
+        useMaxContextWindow: true
+
+        # Platforms whose quota is consumed first. Order = consumption order.
+        # `model` empty means "take the first model the catalog advertises".
+        providers:
+          - id: qoder
+            label: Qoder
+            model: auto
+          - id: trae
+            label: Trae
+            model: glm-5.2
+          - id: codearts
+            label: CodeArts
+            model: deepseek-v4.1-flash-1017
+
+        # Paid APIs used only after every subscription target failed.
+        # Each entry needs the matching environment variable (see README).
+        fallbacks:
+          - glm/glm-4.6
+          - kimi/kimi-k2-0905-preview
+          - minimax/MiniMax-M2
+          - deepseek-api/deepseek-chat
+          - qwen/qwen3-coder-plus

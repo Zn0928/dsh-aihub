@@ -1,0 +1,54 @@
+{
+  "name": "dsh-aihub",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness plugin: one 'aihub' provider that pools Qoder, Trae and CodeArts credits, fails over automatically, and shows quota plus daily check-in in the DSH sidebar.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "qoder",
+    "trae",
+    "codearts",
+    "failover",
+    "llm-gateway"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "qoder.js",
+    "trae.js",
+    "codearts.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "scripts/mock-platform.py"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.19.0"
+  }
+}
