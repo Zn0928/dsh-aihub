@@ -60,7 +60,7 @@ plugin_manager: install_bundle <本仓库绝对路径>
 - 模型选择器出现 **AI Hub → Dev / Dev Fast / Selftest**
 - 左侧栏底部出现 **AI Hub 额度** 卡
 
-> 本插件依赖 `@deepseek-ai/schemastery`（用于设置表单 schema）。通过 `install_bundle` 安装时会自动安装该依赖。
+> 本插件**零运行时依赖**：`index.js` 只使用 Node 内置模块，clone 后可直接安装，无需 `pnpm install`。
 
 ## 配置
 
@@ -143,7 +143,7 @@ cordis.patch.yml
 
 - 语法检查：`node --check index.js`（其余文件同理）
 - 安装后在 DSH 里用 `aihub_selftest` / `aihub_status` 做端到端验证
-- 本仓库不包含 `node_modules`，安装时由 Plugin Manager 解析依赖
+- 仓库无运行时依赖、无 `node_modules`；插件配置页由自身页面提供，不依赖 DSH 原生表单 schema
 
 ## License
 

@@ -1,4 +1,3 @@
-import z from '@deepseek-ai/schemastery'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
@@ -1189,36 +1188,6 @@ function registerConfigApi(ctx, settings) {
     }
   }, 'llm-aihub: configuration API')
 }
-
-const ProviderEntry = z.object({
-  id: z.string().description('已注册的 provider 路由名，例如 qoder、trae、codearts'),
-  label: z.string().default('').description('仅用于显示'),
-  model: z.string().default('').description('该平台使用的模型 id；留空时取该平台目录里的第一个模型'),
-  contextWindow: z.number().default(0).description('兼容字段；优先用 defaultContextWindow / maxContextWindow'),
-  defaultContextWindow: z.number().default(0).description('上游声明的默认上下文窗口'),
-  maxContextWindow: z.number().default(0).description('上游声明的最大上下文窗口'),
-  maxTokens: z.number().default(0).description('该平台模型的输出上限（tokens）；0 表示用目录默认值'),
-})
-
-const ModeEntry = z.object({
-  model: z.string().description('模式名，例如 dev、dev-fast'),
-  label: z.string().default('').description('模型选择器里显示的名字'),
-  contextWindow: z.number().default(200000).description('该模式的上下文窗口'),
-  maxTokens: z.number().default(32000).description('该模式的单次输出上限'),
-  targets: z.array(z.string()).default([]).description('按顺序尝试的 provider/model 列表'),
-  pinned: z.boolean().default(false).description('锁定首个平台：失败就直接报错，不切换'),
-})
-
-/** DSH 设置 → 插件 里渲染的配置表单。 */
-export const Config = z.object({
-  provider: z.string().default('aihub').description('本插件注册的 provider 名'),
-  displayName: z.string().default('AI Hub').description('模型选择器里的分组名'),
-  cooldownMs: z.number().default(60000).description('失败平台的冷却时间（毫秒），0 表示不冷却'),
-  useMaxContextWindow: z.boolean().default(true).description('使用上游声明的最大上下文窗口；关闭则用默认窗口'),
-  providers: z.array(ProviderEntry).default(DEFAULT_PROVIDERS).description('订阅平台：顺序即额度消耗顺序'),
-  fallbacks: z.array(z.string()).default(DEFAULT_FALLBACKS).description('订阅额度用完后的兜底条目，provider/model 或 provider'),
-  modes: z.array(ModeEntry).default([]).description('每个模式自己的模型链与上下文窗口；留空则自动生成 dev / dev-fast'),
-})
 
 /** Model-free diagnostic: run one chain and report which target actually answered. */
 function registerSelftestTool(ctx, adapter, settings) {
