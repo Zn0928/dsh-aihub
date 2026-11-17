@@ -763,9 +763,11 @@ function apply(ctx, config = {}) {
 
 /** One read-only overview: auth, model counts, credits, and the active chain. */
 function registerStatusTool(ctx, settings, adapter) {
-  const tools = ctx.get('tools')
-  if (tools === undefined) return
-  tools.register({
+  // `tools` may be provided by a tool-executor row that activates later, so
+  // wait for the service instead of reading it once while the plugin applies.
+  ctx.inject(['tools'], (ctx) => {
+    const tools = ctx.tools
+    tools.register({
     name: 'aihub_status',
     description: 'Report AI Hub platform status: Qoder/Trae/CodeArts authorization, model counts and credits, plus the active failover chain.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -813,6 +815,7 @@ function registerStatusTool(ctx, settings, adapter) {
       // Strip undefined keys and non-finite numbers so the tool value is lossless JSON.
       return JSON.parse(JSON.stringify(result))
     },
+    })
   })
 }
 
@@ -930,12 +933,11 @@ async function traeSnapshot() {
 
 /** JSON endpoints the settings card reads and writes; no user-facing page. */
 function registerConfigApi(ctx, settings) {
-  const server = ctx.get('webServer')
-  if (server === undefined) {
-    ctx.logger?.warn?.('llm-aihub: webServer is unavailable, the settings card cannot load')
-    return
-  }
-  ctx.effect(() => {
+  // The web server row activates separately; wait for the service so the
+  // settings card never loads against a host that has no routes yet.
+  ctx.inject(['webServer'], (ctx) => {
+    const server = ctx.webServer
+    ctx.effect(() => {
     const state = server.register({
       kind: 'exact',
       path: '/aihub/api/state',
@@ -1187,14 +1189,15 @@ function registerConfigApi(ctx, settings) {
       codeartsCheckin()
     }
   }, 'llm-aihub: configuration API')
+  })
 }
 
 /** Model-free diagnostic: run one chain and report which target actually answered. */
 function registerSelftestTool(ctx, adapter, settings) {
-  const tools = ctx.get('tools')
-  if (tools === undefined) return
+  ctx.inject(['tools'], (ctx) => {
+    const tools = ctx.tools
 
-  tools.register({
+    tools.register({
     name: 'aihub_selftest',
     description: 'Call one AI Hub chain end-to-end and report which platform answered. Use model "selftest" (offline mock) to verify failover without spending quota.',
     parameters: {
@@ -1250,6 +1253,7 @@ function registerSelftestTool(ctx, adapter, settings) {
         ms: Date.now() - started,
       }
     },
+    })
   })
 }
 

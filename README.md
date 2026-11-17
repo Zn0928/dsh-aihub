@@ -42,7 +42,7 @@
 
 ## 环境要求
 
-- DeepSeek Harness 0.2.x（`llm` 服务、`webServer`、`configEditor`、`tools` 可用）
+- DeepSeek Harness 0.2.x（`llm`、`webServer`、`configEditor`、`tools` 服务）。已在 **0.2.2-rc.3** 实测：`webServer`/`tools` 可能晚于本插件激活，插件用 `ctx.inject([...])` 等待服务，不会静默跳过路由和工具注册。
 - Node.js **>= 22.5**（Trae 本地模型表读取使用内置 `node:sqlite`；低版本会自动跳过，不影响主流程）
 - 本机已登录对应官方客户端（推荐），或已配置相应 API Key
 
