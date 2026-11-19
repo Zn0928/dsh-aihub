@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "dsh-aihub",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "DeepSeek Harness plugin: one 'aihub' provider that pools Qoder, Trae and CodeArts credits, fails over automatically, and shows quota plus daily check-in in the DSH sidebar.",
   "type": "module",
   "license": "MIT",

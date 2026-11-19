@@ -1,4 +1,5 @@
-import { createHash, createHmac, createPrivateKey, createSign, randomBytes } from 'node:crypto'
+import { createDecipheriv, createHash, createHmac, createPrivateKey, createSign, randomBytes } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -354,7 +355,12 @@ function accountsPath() {
  */
 export async function refreshCodeArtsAccount(account, signal) {
   if (typeof account.refreshToken !== 'string' || account.refreshToken.length === 0) {
-    throw new Error('CodeArts 账号没有 refresh_token，需要在 CodeArts 客户端重新登录')
+    throw new Error('账号缺少 refresh_token，需要在 CodeArts Agent 客户端重新登录')
+  }
+  if (account.dpopPrivateKey === undefined || account.dpopPrivateKey === null) {
+    // Without the DPoP key the token endpoint cannot be called at all, so say
+    // that plainly instead of surfacing a cryptography type error.
+    throw new Error('账号缺少 DPoP 私钥，无法刷新令牌，需要在 CodeArts Agent 客户端重新登录')
   }
   const dpop = signDpopProof(account.dpopPrivateKey)
   const body = new URLSearchParams({
@@ -375,6 +381,11 @@ export async function refreshCodeArtsAccount(account, signal) {
   })
   if (!response.ok) {
     const detail = await response.text().catch(() => '')
+    // Huawei rotates the refresh token on every use, so a previously used value
+    // is permanently dead: name that case instead of echoing raw STS JSON.
+    if (detail.includes('STS5.1806') || detail.includes('has been used')) {
+      throw new Error('refresh_token 已被使用过（华为每次刷新都会轮换），需要在 CodeArts Agent 客户端重新登录')
+    }
     throw new Error(`CodeArts 刷新失败：HTTP ${response.status} ${detail.slice(0, 200)}`)
   }
   const json = await response.json()
@@ -413,6 +424,163 @@ export function persistCodeArtsAccount(account) {
   const temporary = `${path}.tmp-${process.pid}`
   writeFileSync(temporary, JSON.stringify(document, null, 2), { mode: 0o600 })
   renameSync(temporary, path)
+}
+
+/**
+ * The official CodeArts Agent client keeps its Huawei Cloud session in
+ * `globalStorage/state.vscdb`, encrypted with Electron safeStorage (a
+ * DPAPI-wrapped AES-256-GCM key on Windows). The session there is kept fresh
+ * by that client, so importing it is the practical "log in again" path: log in
+ * (or let the client renew) once, then click "重新登录" to pull the new token.
+ *
+ * Returns undefined when the client is absent or its store is unreadable, so
+ * callers fall back to the on-disk account file.
+ */
+export function importOfficialCodeArtsSession() {
+  const base = join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'codearts-agent')
+  const localStatePath = join(base, 'Local State')
+  const databasePath = join(base, 'User', 'globalStorage', 'state.vscdb')
+  if (!existsSync(localStatePath) || !existsSync(databasePath)) return undefined
+
+  const payload = readSafeStorageSecret(localStatePath, databasePath, 'HuaweiCloudSession')
+  if (payload === undefined) return undefined
+  const session = payload
+  const credentials = {
+    token: String(session.securitytoken ?? ''),
+    accessKeyId: String(session.accessKey ?? ''),
+    secretAccessKey: String(session.secretKey ?? ''),
+  }
+  if (credentials.token.length === 0 || credentials.accessKeyId.length === 0) return undefined
+  const loginContext = session.loginContext ?? {}
+  return {
+    id: String(session.account?.id ?? ''),
+    userName: String(session.account?.label ?? ''),
+    ...credentials,
+    refreshToken: String(session.refresh_token ?? ''),
+    dpopPrivateKey: loginContext.dpopKeyPair?.privateKeyJwk,
+    clientId: 'codearts-agent',
+    expiration: typeof session.expires_at === 'string' ? session.expires_at : undefined,
+    userId: String(session.account?.id ?? ''),
+  }
+}
+
+/**
+ * Decrypt one safeStorage-backed secret out of an Electron `state.vscdb`.
+ *
+ * On Windows the raw key in `Local State` is DPAPI-protected under the current
+ * user, so this shells out to PowerShell for `ProtectedData.Unprotect`; on
+ * Linux/macOS safeStorage uses a keyring the plugin cannot reach, so only the
+ * plaintext and `basic_text` variants are handled.
+ */
+/**
+ * Decrypt one safeStorage-backed secret out of an Electron `state.vscdb`.
+ *
+ * AES-256-GCM authenticates, so a wrong candidate simply fails to decrypt: the
+ * store layer can return every plausible blob and this picks the real one.
+ *
+ * On Windows the raw key in `Local State` is DPAPI-protected under the current
+ * user, so this shells out to PowerShell for `ProtectedData.Unprotect`; on
+ * Linux/macOS safeStorage uses a keyring the plugin cannot reach, so only the
+ * plaintext and `basic_text` variants are handled.
+ */
+function readSafeStorageSecret(localStatePath, databasePath, key) {
+  let localState
+  try {
+    localState = JSON.parse(readFileSync(localStatePath, 'utf8'))
+  } catch {
+    return undefined
+  }
+  let aesKey
+  try {
+    aesKey = unwrapSafeStorageKey(localState.os_crypt?.encrypted_key)
+  } catch {
+    return undefined
+  }
+  if (aesKey === undefined) return undefined
+
+  const identifier = `secret://{"extensionId":"huaweicloud.authentication","key":"${key}"}`
+  for (const value of readValuesFromDatabase(databasePath, identifier)) {
+    const parsed = decodeSecret(value, aesKey)
+    if (parsed !== undefined) return parsed
+  }
+  return undefined
+}
+
+/** Try one stored value; undefined when it is not a decryptable session. */
+function decodeSecret(value, aesKey) {
+  let stored
+  try {
+    stored = JSON.parse(value)
+  } catch {
+    return undefined
+  }
+  if (stored?.type !== 'Buffer' || !Array.isArray(stored.data)) return undefined
+  const blob = Buffer.from(stored.data)
+  if (blob.length < 32) return undefined
+  // Electron prefixes safeStorage blobs with a 3-byte version marker ("v10"/"v11").
+  const nonce = blob.subarray(3, 15)
+  const tag = blob.subarray(blob.length - 16)
+  let plain
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', aesKey, nonce)
+    decipher.setAuthTag(tag)
+    plain = Buffer.concat([decipher.update(blob.subarray(15, blob.length - 16)), decipher.final()])
+  } catch {
+    return undefined
+  }
+  let session
+  try {
+    session = JSON.parse(plain.toString('utf8'))
+  } catch {
+    return undefined
+  }
+  if (typeof session?.securitytoken !== 'string' || session.securitytoken.length === 0) return undefined
+  return session
+}
+
+function unwrapSafeStorageKey(encryptedKey) {
+  if (typeof encryptedKey !== 'string' || encryptedKey.length === 0) return undefined
+  const raw = Buffer.from(encryptedKey, 'base64')
+  if (process.platform !== 'win32') return raw.length === 32 ? raw : undefined
+  if (raw.subarray(0, 5).toString() !== 'DPAPI') return undefined
+  const script = [
+    'Add-Type -AssemblyName System.Security',
+    `$b=[Convert]::FromBase64String('${raw.subarray(5).toString('base64')}')`,
+    '[Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Unprotect($b,$null,\'CurrentUser\'))',
+  ].join(';')
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' })
+  if (result.status !== 0 || typeof result.stdout !== 'string') return undefined
+  const key = Buffer.from(result.stdout.trim(), 'base64')
+  return key.length === 32 ? key : undefined
+}
+
+/**
+ * Read one `ItemTable` row out of the client's SQLite store.
+ *
+ * `state.vscdb` is ordinary SQLite and DSH's runtime ships `node:sqlite`, so no
+ * driver dependency is needed. Large values land on overflow pages, which rules
+ * out a byte-scan fallback: if the built-in module is missing we report nothing
+ * rather than guess, and the caller falls back to the refresh token.
+ */
+function readValuesFromDatabase(databasePath, key) {
+  let DatabaseSync
+  try {
+    DatabaseSync = process.getBuiltinModule?.('node:sqlite')?.DatabaseSync
+  } catch {
+    return []
+  }
+  if (typeof DatabaseSync !== 'function') return []
+  try {
+    const database = new DatabaseSync(databasePath, { readOnly: true })
+    try {
+      const row = database.prepare('SELECT value FROM ItemTable WHERE key = ?').get(key)
+      return row === undefined ? [] : [Buffer.from(String(row.value)).toString('utf8')]
+    } finally {
+      database.close()
+    }
+  } catch {
+    return []
+  }
 }
 
 const WELFARE_ALREADY = new Set(['CLAIMED', 'CONFIRMED', 'CONSUMED'])

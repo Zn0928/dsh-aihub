@@ -65,6 +65,8 @@ window.__ModuleLoader__.load({
         cursor: 'pointer',
       },
       btnOff: { opacity: 0.35, cursor: 'default' },
+      btnWarn: { borderColor: 'var(--dsw-alias-warning, #f0a35e)', color: 'var(--dsw-alias-warning, #f0a35e)' },
+      warn: { marginTop: 8, padding: '8px 10px', borderRadius: 8, fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-warning, #f0a35e)', background: 'var(--dsw-alias-fill-l2, rgba(240,163,94,0.10))' },
       primary: {
         height: 30,
         padding: '0 16px',
@@ -222,6 +224,24 @@ window.__ModuleLoader__.load({
             getJson('/aihub/codearts/state').then(setCodearts).catch(() => {})
           })
           .catch((error) => setFailure('CodeArts 签到失败：' + String(error.message || error)))
+      }
+
+      const reloginCodearts = () => {
+        setMessage('重新登录中…')
+        const refresh = () => getJson('/aihub/codearts/state').then(setCodearts).catch(() => {})
+        getJson('/aihub/codearts/relogin', { method: 'POST' })
+          .then((result) => {
+            if (result.status === 'imported') setMessage('已从 CodeArts 客户端导入最新登录')
+            else if (result.status === 'refreshed') setMessage('CodeArts 登录已刷新')
+            else if (result.status === 'unauthorized') setMessage('本机没有 CodeArts 账号，请先登录客户端')
+            else setMessage('重新登录失败：' + String(result.error || '').slice(0, 80))
+            setTimeout(() => setMessage(''), 4000)
+            return refresh()
+          })
+          .catch((error) => {
+            setFailure('CodeArts 重新登录失败：' + String(error.message || error))
+            return refresh()
+          })
       }
 
       const save = () => {
@@ -478,6 +498,8 @@ window.__ModuleLoader__.load({
           : null,
       )
 
+      const codeartsStale = Boolean(codearts && (codearts.accounts || []).some((account) => account.stale === true ||
+        (account.error && /expired|APIG\.0602|401|403/i.test(String(account.error)))))
       const codeartsLines = ((codearts && codearts.accounts) || []).map((account) => {
         const credits = account.credits
         const text = credits
@@ -493,9 +515,17 @@ window.__ModuleLoader__.load({
               disabled: Boolean(codeartsCheckin && (codeartsCheckin.claimed || codeartsCheckin.status === 'already-claimed')),
               onClick: claimCodearts,
             }, (codeartsCheckin && (codeartsCheckin.claimed || codeartsCheckin.status === 'already-claimed')) ? '已签到' : '签到'),
+            h('button', {
+              style: Object.assign({}, styles.btn, codeartsStale ? styles.btnWarn : {}),
+              onClick: reloginCodearts,
+            }, '重新登录'),
             h('button', { style: styles.btn, onClick: () => { setCodearts(null); load() } }, '刷新'),
           )),
+        codeartsStale
+          ? h('div', { style: styles.warn }, 'CodeArts 登录已过期：额度与模型读数可能不可用。重新登录不会弹出华为云页面——打开 CodeArts Agent 客户端登录（或等它自动续期）后点「重新登录」，AI Hub 直接读取客户端里最新的登录凭证。')
+          : null,
         codeartsLines.length > 0 ? codeartsLines : h('div', { style: styles.meta }, '先在 CodeArts 客户端完成华为云登录。'),
+        h('div', { style: styles.meta }, '「重新登录」会先复用本机 CodeArts Agent 客户端的登录会话；没有可用会话时再用插件内的刷新令牌续期。两者都失效时，才需要在客户端重新登录一次。'),
       )
 
       return h('div', { style: styles.wrap },

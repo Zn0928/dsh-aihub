@@ -24,6 +24,7 @@ import {
   codeartsCheckinStatus,
   fetchCodeArtsCredits,
   fetchCodeArtsModels,
+  importOfficialCodeArtsSession,
   persistCodeArtsAccount,
   readCodeArtsAccounts,
   refreshCodeArtsAccount,
@@ -550,7 +551,7 @@ class FailoverAdapter {
   async *codeartsStream(model, options) {
     const { accounts } = readCodeArtsAccounts()
     if (accounts.length === 0) throw new Error('MISSING_CREDENTIAL: 本机没有 CodeArts 账号')
-    yield* chatCodeArts(accounts[0], model, options, options.signal)
+    yield* chatCodeArts(resolveCodeArtsAccount(accounts[0]), model, options, options.signal)
   }
 
   async *qoderStream(model, options) {
@@ -887,24 +888,57 @@ async function qoderSnapshot() {
   }
 }
 
+/**
+ * Resolve the CodeArts account to use right now.
+ *
+ * The official CodeArts Agent client renews its Huawei Cloud session in the
+ * background, so whenever it holds a valid session for the same account that
+ * one wins: it is the only copy that survives an expired refresh token.
+ */
+function resolveCodeArtsAccount(account) {
+  const official = importOfficialCodeArtsSession()
+  if (official === undefined || official.id !== account.id) return account
+  if (!isFutureTimestamp(official.expiration)) return account
+  if (isFutureTimestamp(account.expiration) && official.expiration <= account.expiration) return account
+  const merged = { ...account, ...official }
+  try {
+    persistCodeArtsAccount(merged)
+  } catch {
+    // A read-only store must not break the caller.
+  }
+  return merged
+}
+
 async function codeartsSnapshot() {
   const { accounts, errors } = readCodeArtsAccounts()
   const rows = []
   let models = []
   for (const account of accounts) {
+    const active = resolveCodeArtsAccount(account)
     const base = {
-      id: account.id,
-      userName: account.userName,
-      expiresAt: account.expiration,
+      id: active.id,
+      userName: active.userName,
+      expiresAt: active.expiration,
     }
     try {
-      rows.push({ ...base, credits: await fetchCodeArtsCredits(account) })
-      if (models.length === 0) models = await fetchCodeArtsModels(account)
+      rows.push({ ...base, credits: await fetchCodeArtsCredits(active) })
+      if (models.length === 0) models = await fetchCodeArtsModels(active)
     } catch (error) {
-      rows.push({ ...base, error: error instanceof Error ? error.message : String(error) })
+      rows.push({
+        ...base,
+        stale: !isFutureTimestamp(active.expiration),
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
   return { accounts: rows, models, errors }
+}
+
+/** True when `value` is an ISO timestamp in the future. */
+function isFutureTimestamp(value) {
+  if (typeof value !== 'string' || value.length === 0) return false
+  const at = Date.parse(value)
+  return Number.isFinite(at) && at > Date.now()
 }
 
 async function traeSnapshot() {
@@ -1176,6 +1210,61 @@ function registerConfigApi(ctx, settings) {
       },
     })
 
+    const codeartsRelogin = server.register({
+      kind: 'exact',
+      path: '/aihub/codearts/relogin',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
+        const { accounts } = readCodeArtsAccounts()
+        const account = accounts[0]
+        if (account === undefined) return sendJson(res, 200, { available: false, status: 'unauthorized' })
+        const errors = []
+        // 1) The official client's store is authoritative when it holds a live
+        //    session: it renews in the background, so this revives a dead
+        //    refresh_token without asking for Huawei's OAuth device flow.
+        let official
+        try {
+          official = importOfficialCodeArtsSession()
+        } catch (error) {
+          errors.push('读取官方客户端会话失败：' + (error instanceof Error ? error.message : String(error)))
+        }
+        if (official !== undefined) {
+          if (official.id !== account.id) {
+            errors.push('官方客户端登录的是另一个账号（' + (official.userName || official.id) + '），未导入')
+          } else {
+            try {
+              const credits = await fetchCodeArtsCredits(official)
+              try {
+                persistCodeArtsAccount({ ...account, ...official })
+              } catch {
+                // Import still succeeds in memory if the store is read-only.
+              }
+              return sendJson(res, 200, { available: true, status: 'imported', source: 'official-client', credits })
+            } catch (error) {
+              errors.push('官方客户端会话已失效：' + (error instanceof Error ? error.message : String(error)))
+            }
+          }
+        } else if (errors.length === 0) {
+          errors.push('未找到 CodeArts Agent 客户端会话')
+        }
+        // 2) Otherwise rotate with the stored refresh_token.
+        try {
+          const fresh = await refreshCodeArtsAccount(account)
+          persistCodeArtsAccount(fresh)
+          const credits = await fetchCodeArtsCredits(fresh)
+          return sendJson(res, 200, { available: true, status: 'refreshed', source: 'refresh-token', credits })
+        } catch (error) {
+          errors.push('刷新令牌失败：' + (error instanceof Error ? error.message : String(error)))
+        }
+        sendJson(res, 400, {
+          available: true,
+          status: 'failed',
+          error: errors.join('；'),
+          hint: '打开 CodeArts Agent 客户端并完成华为云登录，然后回来点「重新登录」。',
+        })
+      },
+    })
+
     return () => {
       state()
       config()
@@ -1184,6 +1273,7 @@ function registerConfigApi(ctx, settings) {
       qoderDisconnect()
       traeState()
       codeartsState()
+      codeartsRelogin()
       qoderCheckin()
       traeCheckin()
       codeartsCheckin()
