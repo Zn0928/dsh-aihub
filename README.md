@@ -94,15 +94,31 @@ plugin_manager: install_bundle <本仓库绝对路径>
 
 ### CodeArts 登录过期了怎么办
 
-华为云的 `refresh_token` 每次刷新都会轮换，用过的旧值立即失效；一旦插件自己那份也过期，就只能换一条可用的登录。卡片上的 **重新登录** 按钮按顺序试两条路：
+华为云的 `refresh_token` 每次刷新都会轮换，用过的旧值立即失效；一旦插件自己那份也过期，就只能换一条可用的登录。卡片上因此分两个按钮：
+
+**自动续期**（不需要浏览器），按顺序试两条路：
 
 1. **复用官方客户端会话**：CodeArts Agent 客户端会把登录续在后台，插件从它的 `User/globalStorage/state.vscdb` 里读出这条会话（Windows 上用 DPAPI 解开 safeStorage 密钥，凭据只在内存中解密，不复制到别处），验证额度可用后写回 `.codearts-accounts.json`。这是最省事的一条——通常只要客户端登录着，点一下就恢复。
 2. **用插件自己的 `refresh_token` 续期**：客户端没装或会话也失效时的兜底。
 
-两条都失败时，按钮会提示你先在 CodeArts Agent 客户端登录一次，再回来点。账号不一致时不会盲目覆盖，会明确提示客户端登录的是另一个账号。
+**华为云登录**（需要浏览器），两条都失败时用：插件发起一次完整的华为云 OAuth2 授权（PKCE + DPoP + 本机回环回调），在卡片上给出授权链接，点开登录一次即可，授权完成后卡片自动刷新。
+
+- 桌面端会拦截 `window.open`，所以授权链接是作为可点击链接渲染在卡片上的，而不是自动弹出窗口。
+- OAuth 交换本身复用本机 `dsh-codearts` 插件已经实现的那一套（它写的是同一份 `.codearts-accounts.json`），AI Hub 只做转发与结果回读，不重复实现一套容易失效的授权端点。
+- 账号不一致时不会盲目覆盖，会明确提示客户端登录的是另一个账号。
 
 - 过期判定不只看 HTTP 401：华为云过期返回的是 `HTTP 400` + `APIG.0602`，插件用「`expiration` 是否已过」外加该错误码一起判断，过期时会先把卡片标黄再提示重新登录。
 - 会话读取依赖 Node 内置的 `node:sqlite`（Node ≥ 22.5）。运行时不支持时该路径会自动跳过，只保留第 2 条，不会报错。
+
+### 打包自检
+
+`node scripts/check-packaging.mjs` 会检查 DSH 加载插件时最容易踩的几个坑：
+
+- `package.json` / `cordis.patch.yml` / 语言包**不能带 UTF-8 BOM**（PowerShell 的 `Set-Content` 会悄悄加上，DSH 随后报 `Unexpected token '\uFEFF', ... is not valid JSON` 并拒绝加载插件）；
+- `exports` 与 `dsh.bundle.patch` 指向的文件必须存在；
+- `dependencies` / `peerDependencies` 必须保持为空（链接目录安装不会安装它们）。
+
+发布前跑一遍，比在 GUI 里看到插件变灰再回头查要快得多。
 
 ## 使用
 

@@ -67,6 +67,7 @@ window.__ModuleLoader__.load({
       btnOff: { opacity: 0.35, cursor: 'default' },
       btnWarn: { borderColor: 'var(--dsw-alias-warning, #f0a35e)', color: 'var(--dsw-alias-warning, #f0a35e)' },
       warn: { marginTop: 8, padding: '8px 10px', borderRadius: 8, fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-warning, #f0a35e)', background: 'var(--dsw-alias-fill-l2, rgba(240,163,94,0.10))' },
+      loginLink: { color: 'var(--dsw-alias-brand, #7c9cff)', textDecoration: 'underline', cursor: 'pointer', marginLeft: 4 },
       primary: {
         height: 30,
         padding: '0 16px',
@@ -155,6 +156,9 @@ window.__ModuleLoader__.load({
       const [qoderCheckin, setQoderCheckin] = React.useState(null)
       const [traeCheckin, setTraeCheckin] = React.useState(null)
       const [codeartsCheckin, setCodeartsCheckin] = React.useState(null)
+      /** Authorization URL from the last "华为云登录" attempt; the desktop shell
+       *  blocks window.open, so the card shows it as a clickable link. */
+      const [loginUrl, setLoginUrl] = React.useState(null)
       const [failure, setFailure] = React.useState(null)
       const [message, setMessage] = React.useState('')
       const [pat, setPat] = React.useState('')
@@ -226,21 +230,88 @@ window.__ModuleLoader__.load({
           .catch((error) => setFailure('CodeArts 签到失败：' + String(error.message || error)))
       }
 
-      const reloginCodearts = () => {
+      const refreshCodeartsState = () => getJson('/aihub/codearts/state').then(setCodearts).catch(() => {})
+
+      /**
+       * Poll the delegated login until it settles. The backend hands back the
+       * authorization URL it used, which is also the key the CodeArts service
+       * tracks the attempt under.
+       */
+      const watchCodeartsLogin = (url) => {
+        let tries = 0
+        const tick = () => {
+          tries += 1
+          getJson('/aihub/codearts/login/status?url=' + encodeURIComponent(url))
+            .then((result) => {
+              if (result.status === 'done') {
+                setLoginUrl(null)
+                setMessage(result.credits
+                  ? 'CodeArts 登录成功，剩余 ' + num(result.credits.remain) + ' / ' + num(result.credits.total)
+                  : 'CodeArts 登录成功')
+                setTimeout(() => setMessage(''), 5000)
+                return refreshCodeartsState()
+              }
+              if (result.status === 'error') {
+                setLoginUrl(null)
+                setMessage('CodeArts 登录失败：' + String(result.error || '').slice(0, 80))
+                setTimeout(() => setMessage(''), 6000)
+                return refreshCodeartsState()
+              }
+              if (result.status === 'idle') {
+                setMessage('登录窗口已关闭，未完成授权')
+                setTimeout(() => setMessage(''), 4000)
+                return undefined
+              }
+              if (tries < 100) setTimeout(tick, 3000)
+              return undefined
+            })
+            .catch(() => { if (tries < 100) setTimeout(tick, 3000) })
+        }
+        setTimeout(tick, 2000)
+      }
+
+      /**
+       * Two-stage re-login. The cheap path reuses whatever token the CodeArts
+       * client already holds; only when that fails do we open a browser and let
+       * the user authorize Huawei Cloud directly.
+       */
+      const reloginCodearts = (interactive) => {
+        if (interactive === true) {
+          setMessage('正在获取华为云授权链接…')
+          getJson('/aihub/codearts/login', { method: 'POST' })
+            .then((result) => {
+              if (result.status !== 'started' || typeof result.url !== 'string') {
+                setMessage('无法发起登录：' + String(result.error || '未知原因').slice(0, 90))
+                setTimeout(() => setMessage(''), 6000)
+                return undefined
+              }
+              // The desktop shell blocks window.open, so surface the link on the
+              // card as well: an ordinary click on a rendered anchor still works.
+              try { window.open(result.url, '_blank', 'noopener') } catch { /* the link stays */ }
+              setLoginUrl(result.url)
+              setMessage('授权页已就绪：点下面的链接打开，登录完成后本卡片会自动更新')
+              watchCodeartsLogin(result.url)
+              return undefined
+            })
+            .catch((error) => setFailure('发起 CodeArts 登录失败：' + String(error.message || error)))
+          return
+        }
         setMessage('重新登录中…')
-        const refresh = () => getJson('/aihub/codearts/state').then(setCodearts).catch(() => {})
         getJson('/aihub/codearts/relogin', { method: 'POST' })
           .then((result) => {
             if (result.status === 'imported') setMessage('已从 CodeArts 客户端导入最新登录')
             else if (result.status === 'refreshed') setMessage('CodeArts 登录已刷新')
-            else if (result.status === 'unauthorized') setMessage('本机没有 CodeArts 账号，请先登录客户端')
-            else setMessage('重新登录失败：' + String(result.error || '').slice(0, 80))
-            setTimeout(() => setMessage(''), 4000)
-            return refresh()
+            else if (result.status === 'unauthorized') setMessage('本机没有 CodeArts 账号，请点「华为云登录」')
+            else {
+              setMessage('自动续期失败，请点「华为云登录」重新授权')
+              if (globalThis.console) console.warn('[aihub] codearts relogin failed:', result.error)
+            }
+            setTimeout(() => setMessage(''), 5000)
+            return refreshCodeartsState()
           })
           .catch((error) => {
             setFailure('CodeArts 重新登录失败：' + String(error.message || error))
-            return refresh()
+            return refreshCodeartsState()
           })
       }
 
@@ -517,15 +588,31 @@ window.__ModuleLoader__.load({
             }, (codeartsCheckin && (codeartsCheckin.claimed || codeartsCheckin.status === 'already-claimed')) ? '已签到' : '签到'),
             h('button', {
               style: Object.assign({}, styles.btn, codeartsStale ? styles.btnWarn : {}),
-              onClick: reloginCodearts,
-            }, '重新登录'),
+              onClick: () => reloginCodearts(false),
+            }, '自动续期'),
+            h('button', {
+              style: styles.btn,
+              onClick: () => reloginCodearts(true),
+            }, '华为云登录'),
             h('button', { style: styles.btn, onClick: () => { setCodearts(null); load() } }, '刷新'),
           )),
         codeartsStale
-          ? h('div', { style: styles.warn }, 'CodeArts 登录已过期：额度与模型读数可能不可用。重新登录不会弹出华为云页面——打开 CodeArts Agent 客户端登录（或等它自动续期）后点「重新登录」，AI Hub 直接读取客户端里最新的登录凭证。')
+          ? h('div', { style: styles.warn }, 'CodeArts 登录已过期：「自动续期」会先复用本机已有的登录（客户端会话或刷新令牌）；两者都失效时，点「华为云登录」在浏览器里重新授权一次即可，授权完成后本卡片会自动刷新。')
+          : null,
+        loginUrl
+          ? h('div', { style: styles.warn },
+            '点此打开华为云授权页：',
+            h('a', {
+              href: loginUrl,
+              target: '_blank',
+              rel: 'noopener noreferrer',
+              style: styles.loginLink,
+            }, '华为云登录'),
+            h('div', { style: styles.meta }, '登录成功后本卡片会自动刷新；此链接仅本次有效。'),
+          )
           : null,
         codeartsLines.length > 0 ? codeartsLines : h('div', { style: styles.meta }, '先在 CodeArts 客户端完成华为云登录。'),
-        h('div', { style: styles.meta }, '「重新登录」会先复用本机 CodeArts Agent 客户端的登录会话；没有可用会话时再用插件内的刷新令牌续期。两者都失效时，才需要在客户端重新登录一次。'),
+        h('div', { style: styles.meta }, '「自动续期」先复用本机 CodeArts Agent 客户端的登录会话，再用插件内的刷新令牌，整个过程不需要打开浏览器。「华为云登录」直接发起一次完整的华为云 OAuth 授权，适合两者都失效（或本机没有装客户端）的情况。'),
       )
 
       return h('div', { style: styles.wrap },

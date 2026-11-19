@@ -1260,8 +1260,80 @@ function registerConfigApi(ctx, settings) {
           available: true,
           status: 'failed',
           error: errors.join('；'),
-          hint: '打开 CodeArts Agent 客户端并完成华为云登录，然后回来点「重新登录」。',
+          hint: '打开 CodeArts Agent 客户端并完成华为云登录后回来点「重新登录」；或点「华为云登录」直接在浏览器里重新授权。',
+          canInteractiveLogin: true,
         })
+      },
+    })
+
+    // Interactive login: hand the user a Huawei authorization URL instead of
+    // sending them to the CodeArts client. The heavyweight OAuth exchange
+    // (PKCE + DPoP + loopback callback) already exists in the dsh-codearts
+    // plugin on this profile, and it writes the same
+    // `~/.dsh/.codearts-accounts.json` we read, so delegate to it rather than
+    // reimplementing an endpoint that only ever sees one account.
+    const codeartsLogin = server.register({
+      kind: 'exact',
+      path: '/aihub/codearts/login',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
+        const { accounts } = readCodeArtsAccounts()
+        const account = accounts[0]
+        const origin = server.getOrigin?.() ?? 'http://127.0.0.1'
+        const base = String(origin).replace(/\/$/, '')
+        const query = account === undefined ? '' : `?account=${encodeURIComponent(account.id)}`
+        let upstream
+        try {
+          upstream = await fetch(`${base}/api/codearts/login${query}`, { method: 'POST' })
+        } catch (error) {
+          return sendJson(res, 503, {
+            status: 'unavailable',
+            error: '本机没有可用的 CodeArts 登录服务：' + (error instanceof Error ? error.message : String(error)),
+            hint: '安装 dsh-codearts 插件后即可在浏览器里直接重新登录。',
+          })
+        }
+        if (!upstream.ok) {
+          const detail = await upstream.text().catch(() => '')
+          return sendJson(res, 502, {
+            status: 'unavailable',
+            error: `CodeArts 登录服务返回 HTTP ${upstream.status} ${detail.slice(0, 200)}`,
+          })
+        }
+        const payload = await upstream.json().catch(() => ({}))
+        if (typeof payload.url !== 'string') {
+          return sendJson(res, 502, { status: 'unavailable', error: '登录服务没有返回授权地址' })
+        }
+        sendJson(res, 200, { status: 'started', url: payload.url, port: payload.port })
+      },
+    })
+
+    const codeartsLoginStatus = server.register({
+      kind: 'exact',
+      path: '/aihub/codearts/login/status',
+      handler: async (req, res) => {
+        if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('url') ?? ''
+        if (url === '') return sendJson(res, 400, { error: 'url is required' })
+        const origin = server.getOrigin?.() ?? 'http://127.0.0.1'
+        let upstream
+        try {
+          upstream = await fetch(`${String(origin).replace(/\/$/, '')}/api/codearts/login/status?url=${encodeURIComponent(url)}`)
+        } catch (error) {
+          return sendJson(res, 503, { status: 'unavailable', error: error instanceof Error ? error.message : String(error) })
+        }
+        const payload = await upstream.json().catch(() => ({}))
+        // The delegate already settled credentials into the shared account
+        // file; re-read so the card can show the refreshed quota immediately.
+        if (payload.status === 'done') {
+          try {
+            const { accounts } = readCodeArtsAccounts()
+            const fresh = accounts[0]
+            if (fresh !== undefined) payload.credits = await fetchCodeArtsCredits(resolveCodeArtsAccount(fresh))
+          } catch {
+            // Quota display is best-effort; the login itself already succeeded.
+          }
+        }
+        sendJson(res, 200, payload)
       },
     })
 
@@ -1274,6 +1346,8 @@ function registerConfigApi(ctx, settings) {
       traeState()
       codeartsState()
       codeartsRelogin()
+      codeartsLogin()
+      codeartsLoginStatus()
       qoderCheckin()
       traeCheckin()
       codeartsCheckin()
