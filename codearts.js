@@ -467,14 +467,6 @@ export function importOfficialCodeArtsSession() {
 /**
  * Decrypt one safeStorage-backed secret out of an Electron `state.vscdb`.
  *
- * On Windows the raw key in `Local State` is DPAPI-protected under the current
- * user, so this shells out to PowerShell for `ProtectedData.Unprotect`; on
- * Linux/macOS safeStorage uses a keyring the plugin cannot reach, so only the
- * plaintext and `basic_text` variants are handled.
- */
-/**
- * Decrypt one safeStorage-backed secret out of an Electron `state.vscdb`.
- *
  * AES-256-GCM authenticates, so a wrong candidate simply fails to decrypt: the
  * store layer can return every plausible blob and this picks the real one.
  *
